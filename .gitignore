@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+.DS_Store
+
+# Application Data
+shared_files/
+storage_node*/
+*.log
+
+# Security (Optional: Remove this line if you WANT to commit the key for coursework grading)
+secret.key

@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  p2p_node:
+    build: .
+    container_name: p2p_node
+    # Map port 8888 to host so other PCs can connect
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./shared_files:/app/shared_files
+    command: python src/main.py 8888
+    stdin_open: true # Keeps input open
+    tty: true        # Allocates a pseudo-terminal
