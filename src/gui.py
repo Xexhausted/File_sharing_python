@@ -10,6 +10,8 @@ import queue
 import time
 import shutil
 from pathlib import Path
+import socket
+from cryptography.fernet import Fernet
 
 # Ensure project root is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -174,7 +176,15 @@ class P2PGUI(ctk.CTk):
         
         # Initialize Core Components
         self.fm = FileManager(storage_dir="./shared_files")
-        self.sm = SecurityManager(key_path="secret.key")
+        
+        key_path = "secret.key"
+        if not os.path.exists(key_path):
+            with open(key_path, "wb") as f:
+                f.write(Fernet.generate_key())
+            self.msg_queue.put({"type": "log", "text": "⚠️ Generated new secret.key"})
+            self.msg_queue.put({"type": "log", "text": "ℹ️ Peers must share this key to communicate."})
+            
+        self.sm = SecurityManager(key_path=key_path)
         self.client = P2PClient(self.fm, self.sm)
         self.server = P2PServer("0.0.0.0", self.port, self.fm, self.sm)
         
@@ -310,9 +320,17 @@ class P2PGUI(ctk.CTk):
         btn_paste = ctk.CTkButton(src_frame, text="Paste", width=100, height=40, font=self.font_bold, command=self.paste_hash)
         btn_paste.grid(row=1, column=2, padx=10, pady=10)
 
-        # Initiate Button
-        self.btn_connect = ctk.CTkButton(tab, text="Initiate Peer Connection", font=self.font_bold, height=50, command=self.initiate_download)
-        self.btn_connect.grid(row=2, column=0, padx=20, pady=20, sticky="ew")
+        # Action Buttons (Connect & Test)
+        action_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        action_frame.grid(row=2, column=0, padx=20, pady=20, sticky="ew")
+        action_frame.grid_columnconfigure(0, weight=3)
+        action_frame.grid_columnconfigure(1, weight=1)
+
+        self.btn_connect = ctk.CTkButton(action_frame, text="Initiate Peer Connection", font=self.font_bold, height=50, command=self.initiate_download)
+        self.btn_connect.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+
+        self.btn_test = ctk.CTkButton(action_frame, text="Test Ping", font=self.font_bold, height=50, fg_color="gray", command=self.test_connection)
+        self.btn_test.grid(row=0, column=1, padx=(10, 0), sticky="ew")
 
         # Progress Section
         prog_frame = ctk.CTkFrame(tab)
@@ -505,6 +523,32 @@ class P2PGUI(ctk.CTk):
             self.entry_hash.insert(0, text)
         except:
             pass
+
+    def test_connection(self):
+        ip_str = self.entry_ip.get().strip()
+        try:
+            port = int(self.entry_port.get())
+        except ValueError:
+            messagebox.showerror("Error", "Invalid Port")
+            return
+            
+        if not ip_str:
+            messagebox.showwarning("Warning", "Enter Peer IP to test")
+            return
+
+        ips = [ip.strip() for ip in ip_str.split(',') if ip.strip()]
+        self.log_message(f"Testing TCP connection to {ips} on port {port}...")
+        
+        def ping_task():
+            for ip in ips:
+                try:
+                    s = socket.create_connection((ip, port), timeout=3)
+                    s.close()
+                    self.msg_queue.put({"type": "log", "text": f"✅ Online: {ip}:{port} is reachable!"})
+                except Exception as e:
+                    self.msg_queue.put({"type": "log", "text": f"❌ Offline: {ip}:{port} ({e})"})
+
+        threading.Thread(target=ping_task, daemon=True).start()
 
 if __name__ == "__main__":
     app = P2PGUI()

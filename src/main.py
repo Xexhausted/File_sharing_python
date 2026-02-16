@@ -2,6 +2,7 @@ import asyncio
 import sys
 import logging
 import os
+from cryptography.fernet import Fernet
 
 # Ensure src is in path if running from src directly
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,7 +21,14 @@ async def main():    # Parse port from command line args
 
     # 1. Setup Managers
     fm = FileManager(storage_dir="./shared_files")
-    sm = SecurityManager(key_path="secret.key")
+    
+    key_path = "secret.key"
+    if not os.path.exists(key_path):
+        print("Generating new security key...")
+        with open(key_path, "wb") as f:
+            f.write(Fernet.generate_key())
+            
+    sm = SecurityManager(key_path=key_path)
     
     # 2. Start Server
     server = P2PServer("0.0.0.0", port, fm, sm)
