@@ -94,7 +94,7 @@ class P2PClient:
         self.fm = file_manager
         self.sm = security_manager
 
-    async def download_file(self, peer_ips: List[str], port: int, file_hash: str):
+    async def download_file(self, peer_ips: List[str], port: int, file_hash: str, progress_callback=None):
         # For simplicity in this demo, we pick the first peer to get the manifest
         # In a full implementation, we would query all peers.
         primary_peer = peer_ips[0]
@@ -137,6 +137,8 @@ class P2PClient:
                     # Verify Integrity
                     if hashlib.sha256(data).hexdigest() == manifest['chunks'][i]:
                         self.fm.write_chunk(file_hash, i, data, file_size, filename)
+                        if progress_callback:
+                            progress_callback(file_hash, filename, i + 1, total_chunks, len(data))
                         print(f"Downloaded chunk {i+1}/{total_chunks}")
                     else:
                         logger.error(f"Hash mismatch for chunk {i}")
