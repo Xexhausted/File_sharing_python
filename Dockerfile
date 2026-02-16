@@ -13,7 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the source code and the secret key (so all nodes share the same key)
 COPY src/ ./src/
-COPY secret.key .
 
 # Default command (can be overridden in docker-compose)
 CMD ["python", "src/main.py", "8888"]

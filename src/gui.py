@@ -276,6 +276,10 @@ class P2PGUI(ctk.CTk):
         self.btn_seed = ctk.CTkButton(tab, text="Start Seeding", font=self.font_bold, height=50, fg_color="green", command=self.start_seeding)
         self.btn_seed.grid(row=2, column=0, padx=20, pady=30, sticky="ew")
 
+        # Export Key Button
+        self.btn_export = ctk.CTkButton(tab, text="Export Security Key", font=self.font_bold, height=40, fg_color="gray", command=self.export_key)
+        self.btn_export.grid(row=3, column=0, padx=20, pady=(0, 20), sticky="ew")
+
     def _setup_download_tab(self):
         tab = self.tabview.tab("Download/Receive")
         tab.grid_columnconfigure(0, weight=1)
@@ -549,6 +553,20 @@ class P2PGUI(ctk.CTk):
                     self.msg_queue.put({"type": "log", "text": f"❌ Offline: {ip}:{port} ({e})"})
 
         threading.Thread(target=ping_task, daemon=True).start()
+
+    def export_key(self):
+        key_path = "secret.key"
+        if os.path.exists(key_path):
+            with open(key_path, "rb") as f:
+                key_data = f.read()
+            
+            dest = filedialog.asksaveasfilename(defaultextension=".key", initialfile="secret.key", title="Save Security Key")
+            if dest:
+                with open(dest, "wb") as f:
+                    f.write(key_data)
+                self.log_message(f"Key exported to: {dest}")
+        else:
+            messagebox.showerror("Error", "Secret key not found!")
 
 if __name__ == "__main__":
     app = P2PGUI()
