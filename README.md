@@ -9,7 +9,11 @@ A distributed Peer-to-Peer (P2P) file sharing application built with Python. It 
 *   **File Slicing:** Files are split into 1MB chunks for efficient transfer.
 *   **Integrity:** SHA-256 verification for every chunk and the final reassembled file.
 *   **Dockerized:** Easy deployment using Docker and Docker Compose.
+<<<<<<< HEAD
+*   **GUI & CLI:** Includes both a Command Line Interface and a Tkinter GUI.
+=======
 *   **GUI & CLI:** Includes a CLI and a modern, dark-themed GUI built with CustomTkinter.
+>>>>>>> main
 
 ---
 
