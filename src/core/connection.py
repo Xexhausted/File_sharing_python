@@ -156,7 +156,7 @@ class P2PClient:
                 msg = json.dumps({"cmd": "DISCOVER", "file_hash": file_hash}).encode()
                 sock = self.transport.get_extra_info('socket')
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-                self.transport.sendto(msg, ('<broadcast>', DISCOVERY_PORT))
+                self.transport.sendto(msg, ('255.255.255.255', DISCOVERY_PORT))
             def datagram_received(self, data, addr):
                 try:
                     msg = json.loads(data.decode())
