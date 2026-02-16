@@ -1,6 +1,6 @@
 import tkinter as tk
 import customtkinter as ctk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 import asyncio
 import threading
 import sys
@@ -8,6 +8,8 @@ import os
 import logging
 import queue
 import time
+import shutil
+from pathlib import Path
 
 # Ensure project root is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,8 +25,12 @@ ctk.set_default_color_theme("blue")
 class P2PGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("P2P File Sharer - Dashboard")
-        self.geometry("1100x700")
+        self.title("P2P File Sharer - Pro Dashboard")
+        self.geometry("900x750")
+
+        # --- Fonts ---
+        self.font_text = ctk.CTkFont(family="Segoe UI", size=14)
+        self.font_bold = ctk.CTkFont(family="Segoe UI", size=18, weight="bold")
 
         # --- Configuration ---
         self.port = 8888
@@ -36,8 +42,8 @@ class P2PGUI(ctk.CTk):
         
         # --- Internal Logic & State ---
         self.msg_queue = queue.Queue()
-        self.active_downloads = {}  # hash -> {filename, total_chunks, downloaded_chunks, speed_history}
-        self.start_time = time.time()
+        self.download_dest_path = Path.home() / "Downloads"
+        self.active_download = None
         
         # Initialize Core Components
         self.fm = FileManager(storage_dir="./shared_files")
@@ -54,242 +60,197 @@ class P2PGUI(ctk.CTk):
         
         # Start Polling Loop
         self.after(100, self.check_queue)
+        self.log_message(f"System started on port {self.port}")
 
     def start_async_loop(self):
         asyncio.set_event_loop(self.loop)
         self.loop.run_until_complete(self.server.start())
 
     def _setup_ui(self):
-        # Grid Layout
-        self.grid_columnconfigure(1, weight=1)
+        # Grid Layout: Row 0 = Tabs (weight 1), Row 1 = Log (weight 0)
         self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
-        # --- Sidebar ---
-        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
-        self.sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        self.sidebar.grid_rowconfigure(5, weight=1)
+        # 1. Tabview
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+        self.tabview.add("Upload/Share")
+        self.tabview.add("Download/Receive")
 
-        ctk.CTkLabel(self.sidebar, text="P2P Node", font=ctk.CTkFont(size=20, weight="bold")).grid(row=0, column=0, padx=20, pady=(20, 10))
-        ctk.CTkLabel(self.sidebar, text=f"Port: {self.port}", text_color="gray").grid(row=1, column=0, padx=20, pady=(0, 20))
+        self._setup_upload_tab()
+        self._setup_download_tab()
 
-        self.btn_all = ctk.CTkButton(self.sidebar, text="All Transfers", command=lambda: self.filter_view("all"), fg_color="transparent", border_width=2, text_color=("gray10", "#DCE4EE"))
-        self.btn_all.grid(row=2, column=0, padx=20, pady=10)
-        
-        self.btn_dl = ctk.CTkButton(self.sidebar, text="Downloading", command=lambda: self.filter_view("downloading"), fg_color="transparent", border_width=2, text_color=("gray10", "#DCE4EE"))
-        self.btn_dl.grid(row=3, column=0, padx=20, pady=10)
+        # 2. Log Window
+        self.log_box = ctk.CTkTextbox(self, height=150, font=self.font_text)
+        self.log_box.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="ew")
+        self.log_box.insert("0.0", "--- Event Log ---\n")
+        self.log_box.configure(state="disabled")
 
-        # Action Buttons
-        ctk.CTkButton(self.sidebar, text="＋ Share File", command=self.share_file).grid(row=6, column=0, padx=20, pady=10)
-        ctk.CTkButton(self.sidebar, text="⬇ Download", command=self.open_download_dialog).grid(row=7, column=0, padx=20, pady=(10, 20))
+    def _setup_upload_tab(self):
+        tab = self.tabview.tab("Upload/Share")
+        tab.grid_columnconfigure(0, weight=1)
 
-        # --- Main Dashboard ---
-        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
-        self.main_frame.grid_rowconfigure(1, weight=1)
-        self.main_frame.grid_columnconfigure(0, weight=1)
+        # Select Button
+        self.btn_select = ctk.CTkButton(tab, text="Select File to Share", font=self.font_bold, height=50, command=self.select_file)
+        self.btn_select.grid(row=0, column=0, padx=20, pady=30, sticky="ew")
 
-        # Header
-        ctk.CTkLabel(self.main_frame, text="Dashboard", font=ctk.CTkFont(size=24)).grid(row=0, column=0, sticky="w", pady=(0, 10))
-
-        # Treeview (List of Files)
-        # CustomTkinter doesn't have a Treeview, so we wrap a ttk.Treeview in a frame
-        self.tree_frame = ctk.CTkFrame(self.main_frame)
-        self.tree_frame.grid(row=1, column=0, sticky="nsew")
-        self.tree_frame.grid_rowconfigure(0, weight=1)
-        self.tree_frame.grid_columnconfigure(0, weight=1)
-
-        self._setup_treeview_style()
-        
-        self.columns = ("filename", "size", "progress", "status", "speed")
-        self.tree = ttk.Treeview(self.tree_frame, columns=self.columns, show="headings", selectmode="browse")
-        
-        self.tree.heading("filename", text="Filename")
-        self.tree.heading("size", text="Size")
-        self.tree.heading("progress", text="Progress")
-        self.tree.heading("status", text="Status")
-        self.tree.heading("speed", text="Down Speed")
-        
-        self.tree.column("filename", width=250)
-        self.tree.column("size", width=80)
-        self.tree.column("progress", width=100)
-        self.tree.column("status", width=100)
-        self.tree.column("speed", width=100)
-        
-        self.tree.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
-        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
-
-        # --- Info Panel (Bottom) ---
-        self.info_frame = ctk.CTkFrame(self.main_frame, height=150)
-        self.info_frame.grid(row=2, column=0, sticky="ew", pady=(20, 0))
+        # Info Box
+        self.info_frame = ctk.CTkFrame(tab)
+        self.info_frame.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
         self.info_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.info_frame, text="Selected File Details", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", padx=10, pady=5)
-        
-        self.lbl_filename = ctk.CTkLabel(self.info_frame, text="No file selected")
-        self.lbl_filename.grid(row=1, column=0, sticky="w", padx=10)
+        labels = ["File Path:", "Size:", "SHA-256 Hash:"]
+        self.vars_upload = {
+            "path": ctk.StringVar(value="No file selected"),
+            "size": ctk.StringVar(value="--"),
+            "hash": ctk.StringVar(value="--")
+        }
 
-        self.progress_bar = ctk.CTkProgressBar(self.info_frame)
-        self.progress_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
+        for i, label in enumerate(labels):
+            ctk.CTkLabel(self.info_frame, text=label, font=self.font_bold).grid(row=i, column=0, padx=10, pady=10, sticky="w")
+            entry = ctk.CTkEntry(self.info_frame, textvariable=list(self.vars_upload.values())[i], font=self.font_text, state="readonly")
+            entry.grid(row=i, column=1, padx=10, pady=10, sticky="ew")
+
+        # Start Seeding Button
+        self.btn_seed = ctk.CTkButton(tab, text="Start Seeding", font=self.font_bold, height=50, fg_color="green", command=self.start_seeding)
+        self.btn_seed.grid(row=2, column=0, padx=20, pady=30, sticky="ew")
+
+    def _setup_download_tab(self):
+        tab = self.tabview.tab("Download/Receive")
+        tab.grid_columnconfigure(0, weight=1)
+
+        # Destination Section
+        dest_frame = ctk.CTkFrame(tab)
+        dest_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        dest_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(dest_frame, text="Destination:", font=self.font_bold).grid(row=0, column=0, padx=10, pady=10)
+        self.entry_dest = ctk.CTkEntry(dest_frame, font=self.font_text)
+        self.entry_dest.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
+        self.entry_dest.insert(0, str(self.download_dest_path))
+        
+        btn_browse = ctk.CTkButton(dest_frame, text="Browse Folder", font=self.font_text, command=self.browse_dest)
+        btn_browse.grid(row=0, column=2, padx=10, pady=10)
+
+        # Source Section
+        src_frame = ctk.CTkFrame(tab)
+        src_frame.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
+        src_frame.grid_columnconfigure(1, weight=1)
+
+        # IP/Port
+        conn_frame = ctk.CTkFrame(src_frame, fg_color="transparent")
+        conn_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        
+        ctk.CTkLabel(conn_frame, text="Peer IP:", font=self.font_text).pack(side="left", padx=5)
+        self.entry_ip = ctk.CTkEntry(conn_frame, width=150, font=self.font_text)
+        self.entry_ip.pack(side="left", padx=5)
+        self.entry_ip.insert(0, "127.0.0.1")
+
+        ctk.CTkLabel(conn_frame, text="Port:", font=self.font_text).pack(side="left", padx=5)
+        self.entry_port = ctk.CTkEntry(conn_frame, width=80, font=self.font_text)
+        self.entry_port.pack(side="left", padx=5)
+        self.entry_port.insert(0, "8888")
+
+        # Hash
+        ctk.CTkLabel(src_frame, text="Source File Hash:", font=self.font_bold).grid(row=1, column=0, padx=10, pady=10, sticky="w")
+        self.entry_hash = ctk.CTkEntry(src_frame, font=self.font_text, placeholder_text="Paste SHA-256 Hash here...")
+        self.entry_hash.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+
+        # Initiate Button
+        self.btn_connect = ctk.CTkButton(tab, text="Initiate Peer Connection", font=self.font_bold, height=50, command=self.initiate_download)
+        self.btn_connect.grid(row=2, column=0, padx=20, pady=20, sticky="ew")
+
+        # Progress Section
+        prog_frame = ctk.CTkFrame(tab)
+        prog_frame.grid(row=3, column=0, padx=10, pady=10, sticky="ew")
+        prog_frame.grid_columnconfigure(0, weight=1)
+
+        self.lbl_status = ctk.CTkLabel(prog_frame, text="Status: Idle", font=self.font_text)
+        self.lbl_status.grid(row=0, column=0, sticky="w", padx=10, pady=5)
+
+        self.lbl_speed = ctk.CTkLabel(prog_frame, text="Speed: 0.0 MB/s", font=self.font_text)
+        self.lbl_speed.grid(row=0, column=1, sticky="e", padx=10, pady=5)
+
+        self.progress_bar = ctk.CTkProgressBar(prog_frame, height=20)
+        self.progress_bar.grid(row=1, column=0, columnspan=2, padx=10, pady=(5, 15), sticky="ew")
         self.progress_bar.set(0)
-
-        self.lbl_stats = ctk.CTkLabel(self.info_frame, text="ETA: -- | Peers: 0 | Hash: --")
-        self.lbl_stats.grid(row=3, column=0, sticky="w", padx=10, pady=(0, 10))
-
-        # --- Footer (Speed Stats) ---
-        self.footer = ctk.CTkFrame(self, height=30, corner_radius=0)
-        self.footer.grid(row=1, column=1, sticky="ew")
-        
-        self.lbl_total_down = ctk.CTkLabel(self.footer, text="Total Down: 0 KB/s", text_color="#4CC2FF")
-        self.lbl_total_down.pack(side="right", padx=20)
-
-    def _setup_treeview_style(self):
-        style = ttk.Style()
-        style.theme_use("clam")
-        
-        # Dark theme colors
-        bg_color = "#2b2b2b"
-        fg_color = "white"
-        header_bg = "#343638"
-        
-        style.configure("Treeview", background=bg_color, foreground=fg_color, fieldbackground=bg_color, borderwidth=0, rowheight=25)
-        style.map('Treeview', background=[('selected', '#1f538d')])
-        
-        style.configure("Treeview.Heading", background=header_bg, foreground=fg_color, relief="flat")
-        style.map("Treeview.Heading", background=[('active', '#404244')])
 
     # --- Logic & Threading ---
 
+    def log_message(self, msg):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
     def check_queue(self):
-        """Polls the queue for updates from the networking thread."""
         try:
             while True:
                 msg = self.msg_queue.get_nowait()
-                self.process_message(msg)
+                if msg['type'] == 'log':
+                    self.log_message(msg['text'])
+                elif msg['type'] == 'progress':
+                    self.update_progress(msg)
+                elif msg['type'] == 'seed_complete':
+                    self.vars_upload["hash"].set(msg['hash'])
+                    self.log_message(f"Seeding active. Hash: {msg['hash']}")
         except queue.Empty:
             pass
-        
-        self.update_speeds()
         self.after(100, self.check_queue)
 
-    def process_message(self, msg):
-        """Handles messages from the background thread."""
-        if msg['type'] == 'progress':
-            f_hash = msg['file_hash']
-            filename = msg['filename']
-            chunk_idx = msg['chunk_index']
-            total = msg['total_chunks']
-            bytes_received = msg['bytes']
-            
-            # Update State
-            if f_hash not in self.active_downloads:
-                # Create entry in Treeview if not exists
-                if not self.tree.exists(f_hash):
-                    self.tree.insert("", "end", iid=f_hash, values=(filename, "Calculating...", "0%", "Downloading", "0 KB/s"))
-                self.active_downloads[f_hash] = {
-                    "filename": filename,
-                    "total": total,
-                    "done": 0,
-                    "speed_history": [] # (timestamp, bytes)
-                }
-            
-            state = self.active_downloads[f_hash]
-            state['done'] = chunk_idx
-            state['speed_history'].append((time.time(), bytes_received))
-            
-            # Update Treeview
-            percent = int((chunk_idx / total) * 100)
-            self.tree.set(f_hash, "progress", f"{percent}%")
-            
-            # Update Detail Panel if selected
-            selected = self.tree.selection()
-            if selected and selected[0] == f_hash:
-                self.progress_bar.set(chunk_idx / total)
-                self.lbl_filename.configure(text=f"{filename} ({chunk_idx}/{total} chunks)")
+    def select_file(self):
+        path = filedialog.askopenfilename()
+        if path:
+            p = Path(path)
+            self.vars_upload["path"].set(str(p))
+            size_mb = p.stat().st_size / (1024 * 1024)
+            self.vars_upload["size"].set(f"{size_mb:.2f} MB")
+            self.vars_upload["hash"].set("Pending Seeding...")
 
-    def update_speeds(self):
-        """Calculates real-time speed based on recent history."""
-        now = time.time()
-        total_speed = 0
-        
-        for f_hash, state in self.active_downloads.items():
-            # Filter history for last 1 second
-            state['speed_history'] = [(t, b) for t, b in state['speed_history'] if now - t <= 1.0]
-            
-            # Sum bytes
-            bytes_in_last_sec = sum(b for t, b in state['speed_history'])
-            speed_kb = bytes_in_last_sec / 1024
-            total_speed += speed_kb
-            
-            # Update Treeview Speed Column
-            if self.tree.exists(f_hash):
-                self.tree.set(f_hash, "speed", f"{speed_kb:.1f} KB/s")
-                if state['done'] == state['total']:
-                    self.tree.set(f_hash, "status", "Completed")
-                    self.tree.set(f_hash, "speed", "0 KB/s")
-
-        self.lbl_total_down.configure(text=f"Total Down: {total_speed:.1f} KB/s")
-
-    def browse_file(self):
-        filename = filedialog.askopenfilename()
-        if filename:
-            return filename
-        return None
-
-    def share_file(self):
-        filepath = self.browse_file()
-        if not filepath:
+    def start_seeding(self):
+        path_str = self.vars_upload["path"].get()
+        if not os.path.exists(path_str):
+            messagebox.showerror("Error", "Invalid file path")
             return
         try:
-            manifest = self.fm.slice_file(filepath)
-            
-            # Add to treeview as Seeding
-            f_hash = manifest['file_hash']
-            fname = manifest['filename']
-            size_mb = manifest['size'] / (1024*1024)
-            
-            if not self.tree.exists(f_hash):
-                self.tree.insert("", "end", iid=f_hash, values=(fname, f"{size_mb:.2f} MB", "100%", "Seeding", "0 KB/s"))
-            
-            # Show Hash
-            dialog = ctk.CTkInputDialog(text="File Shared! Copy Hash:", title="Share Success")
-            dialog.entry.insert(0, f_hash)
-            dialog.wait_window()
-            
+            # Run in thread to avoid freeze
+            def seed_task():
+                try:
+                    manifest = self.fm.slice_file(path_str)
+                    self.msg_queue.put({"type": "log", "text": f"Seeding started: {manifest['filename']}"})
+                    self.msg_queue.put({"type": "seed_complete", "hash": manifest['file_hash']})
+                except Exception as e:
+                    self.msg_queue.put({"type": "log", "text": f"Error seeding: {e}"})
+
+            threading.Thread(target=seed_task, daemon=True).start()
+            self.log_message("Hashing file... please wait.")
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            self.log_message(f"Error: {e}")
 
-    def open_download_dialog(self):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Download File")
-        dialog.geometry("400x300")
-        
-        ctk.CTkLabel(dialog, text="Peer IP:").pack(pady=5)
-        entry_ip = ctk.CTkEntry(dialog)
-        entry_ip.pack(pady=5)
-        entry_ip.insert(0, "127.0.0.1")
-        
-        ctk.CTkLabel(dialog, text="Peer Port:").pack(pady=5)
-        entry_port = ctk.CTkEntry(dialog)
-        entry_port.pack(pady=5)
-        entry_port.insert(0, "8888")
-        
-        ctk.CTkLabel(dialog, text="File Hash:").pack(pady=5)
-        entry_hash = ctk.CTkEntry(dialog)
-        entry_hash.pack(pady=5)
-        
-        def confirm():
-            ip = entry_ip.get()
-            try: port = int(entry_port.get())
-            except: return
-            f_hash = entry_hash.get()
-            
-            if ip and f_hash:
-                self.start_download(ip, port, f_hash)
-                dialog.destroy()
-                
-        ctk.CTkButton(dialog, text="Start Download", command=confirm).pack(pady=20)
+    def browse_dest(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.entry_dest.delete(0, "end")
+            self.entry_dest.insert(0, path)
+            self.download_dest_path = Path(path)
 
-    def start_download(self, ip, port, f_hash):
+    def initiate_download(self):
+        ip = self.entry_ip.get()
+        try:
+            port = int(self.entry_port.get())
+        except ValueError:
+            messagebox.showerror("Error", "Invalid Port")
+            return
+        f_hash = self.entry_hash.get().strip()
+        
+        if not ip or not f_hash:
+            messagebox.showwarning("Warning", "Missing IP or Hash")
+            return
+
+        self.lbl_status.configure(text="Status: Connecting...")
+        self.progress_bar.set(0)
+        self.active_download = {"start_time": time.time(), "bytes": 0}
+        
         # Callback to bridge asyncio -> GUI
         def progress_callback(file_hash, filename, chunk_index, total_chunks, bytes_len):
             self.msg_queue.put({
@@ -305,23 +266,40 @@ class P2PGUI(ctk.CTk):
             self.client.download_file([ip], port, f_hash, progress_callback), 
             self.loop
         )
+        self.log_message(f"Requesting {f_hash} from {ip}:{port}")
 
-    def on_tree_select(self, event):
-        selected = self.tree.selection()
-        if not selected: return
-        f_hash = selected[0]
+    def update_progress(self, msg):
+        # Calculate speed
+        now = time.time()
+        if self.active_download:
+            self.active_download["bytes"] += msg['bytes']
+            elapsed = now - self.active_download["start_time"]
+            if elapsed > 0:
+                speed = (self.active_download["bytes"] / (1024*1024)) / elapsed
+                self.lbl_speed.configure(text=f"Speed: {speed:.2f} MB/s")
+
+        percent = msg['chunk_index'] / msg['total_chunks']
+        self.progress_bar.set(percent)
+        self.lbl_status.configure(text=f"Status: Downloading chunk {msg['chunk_index']}/{msg['total_chunks']}")
         
-        if f_hash in self.active_downloads:
-            data = self.active_downloads[f_hash]
-            self.lbl_filename.configure(text=data['filename'])
-            self.lbl_stats.configure(text=f"Hash: {f_hash[:10]}...")
-            if data['total'] > 0:
-                self.progress_bar.set(data['done'] / data['total'])
+        if msg['chunk_index'] == msg['total_chunks']:
+            self.lbl_status.configure(text="Status: Completed")
+            self.log_message(f"Download finished: {msg['filename']}")
+            self.finalize_download(msg['filename'])
 
-    def filter_view(self, mode):
-        # Simple filter implementation could hide/show tree items
-        # For now, we just log it or could detach items
-        pass
+    def finalize_download(self, filename):
+        src = Path(self.fm.storage_dir) / filename
+        dest_dir = Path(self.entry_dest.get())
+        dest = dest_dir / filename
+        try:
+            if not dest_dir.exists(): dest_dir.mkdir(parents=True, exist_ok=True)
+            if src.exists():
+                shutil.copy(src, dest)
+                self.log_message(f"File saved to: {dest}")
+            else:
+                self.log_message(f"Error: Source file {src} not found.")
+        except Exception as e:
+            self.log_message(f"Error moving file: {e}")
 
 if __name__ == "__main__":
     app = P2PGUI()
