@@ -20,10 +20,9 @@ async def main():    # Parse port from command line args
         port = int(sys.argv[1])
 
     # 1. Setup Managers
-    storage_dir = "./shared_files"
-    fm = FileManager(storage_dir=storage_dir)
+    fm = FileManager(storage_dir="./shared_files")
     
-    key_path = os.path.join(storage_dir, "secret.key")
+    key_path = "secret.key"
     if not os.path.exists(key_path):
         print("Generating new security key...")
         with open(key_path, "wb") as f:

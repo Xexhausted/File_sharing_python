@@ -3,7 +3,7 @@ import os
 from typing import Optional
 
 class SecurityManager:
-    def __init__(self, key_path: str):
+    def __init__(self, key_path: str = "secret.key"):
         self.key_path = key_path
         self.key = self._load_or_generate_key()
         self.cipher = Fernet(self.key)
