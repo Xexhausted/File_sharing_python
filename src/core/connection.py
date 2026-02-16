@@ -3,6 +3,7 @@ import json
 import logging
 import base64
 import hashlib
+import socket
 from typing import List
 
 try:
@@ -17,6 +18,35 @@ from src.security.encryptor import SecurityManager
 
 logger = logging.getLogger("P2PConnection")
 
+MAX_MSG_SIZE = 1024 * 1024 * 1024  # 1 GB Limit
+DISCOVERY_PORT = 9999
+
+class DiscoveryProtocol(asyncio.DatagramProtocol):
+    def __init__(self, file_manager, tcp_port):
+        self.fm = file_manager
+        self.tcp_port = tcp_port
+        self.transport = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def datagram_received(self, data, addr):
+        try:
+            msg = json.loads(data.decode())
+            if msg.get('cmd') == 'DISCOVER':
+                file_hash = msg.get('file_hash')
+                # Check if we have the file manifest
+                if file_hash in self.fm.manifests:
+                    # Reply to the sender
+                    response = json.dumps({
+                        "cmd": "FOUND",
+                        "file_hash": file_hash,
+                        "tcp_port": self.tcp_port
+                    }).encode()
+                    self.transport.sendto(response, addr)
+        except Exception:
+            pass
+
 class P2PServer:
     def __init__(self, host: str, port: int, file_manager: FileManager, security_manager: SecurityManager):
         self.host = host
@@ -27,6 +57,23 @@ class P2PServer:
     async def start(self):
         server = await asyncio.start_server(self.handle_client, self.host, self.port)
         logger.info(f"Server listening on {self.host}:{self.port}")
+        
+        # Start UDP Discovery Service
+        loop = asyncio.get_running_loop()
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, 'SO_REUSEPORT'):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            sock.bind(('0.0.0.0', DISCOVERY_PORT))
+            
+            await loop.create_datagram_endpoint(
+                lambda: DiscoveryProtocol(self.fm, self.port), sock=sock
+            )
+            logger.info(f"Discovery service active on UDP {DISCOVERY_PORT}")
+        except Exception as e:
+            logger.warning(f"Discovery service failed to start: {e}")
+
         async with server:
             await server.serve_forever()
 
@@ -38,6 +85,10 @@ class P2PServer:
                 length_data = await reader.read(4)
                 if not length_data: break
                 length = int.from_bytes(length_data, 'big')
+                
+                if length > MAX_MSG_SIZE:
+                    logger.warning(f"Blocked oversized message ({length} bytes) from {addr}")
+                    break
                 
                 # 2. Read Encrypted Payload
                 encrypted_msg = await reader.readexactly(length)
@@ -94,66 +145,100 @@ class P2PClient:
         self.fm = file_manager
         self.sm = security_manager
 
-    async def download_file(self, peer_ips: List[str], port: int, file_hash: str):
-        # For simplicity in this demo, we pick the first peer to get the manifest
-        # In a full implementation, we would query all peers.
-        primary_peer = peer_ips[0]
+    async def discover_peers(self, file_hash: str, timeout=2.0) -> List[str]:
+        found_peers = set()
         
-        try:
-            reader, writer = await asyncio.open_connection(primary_peer, port)
-            
-            # Handshake
-            await self._send_msg(writer, P2PProtocol.HANDSHAKE, {"id": "client"})
-            resp = await self._recv_msg(reader)
-            if not resp or resp.get('cmd') != P2PProtocol.HANDSHAKE_ACK:
-                logger.error("Handshake failed")
-                return
+        class DiscoveryClientProtocol(asyncio.DatagramProtocol):
+            def __init__(self):
+                self.transport = None
+            def connection_made(self, transport):
+                self.transport = transport
+                msg = json.dumps({"cmd": "DISCOVER", "file_hash": file_hash}).encode()
+                sock = self.transport.get_extra_info('socket')
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                self.transport.sendto(msg, ('<broadcast>', DISCOVERY_PORT))
+            def datagram_received(self, data, addr):
+                try:
+                    msg = json.loads(data.decode())
+                    if msg.get('cmd') == 'FOUND' and msg.get('file_hash') == file_hash:
+                        found_peers.add(addr[0])
+                except: pass
+            def error_received(self, exc): pass
 
-            # Get Manifest
-            await self._send_msg(writer, P2PProtocol.QUERY, {"file_hash": file_hash})
-            resp = await self._recv_msg(reader)
-            
-            if not resp or resp.get('cmd') != P2PProtocol.QUERY_HIT:
-                logger.error("File not found on peer")
-                return
-            
-            manifest = resp['payload']
-            total_chunks = len(manifest['chunks'])
-            filename = manifest['filename']
-            file_size = manifest['size']
-            
-            logger.info(f"Downloading {filename} ({total_chunks} chunks)...")
+        loop = asyncio.get_running_loop()
+        transport, protocol = await loop.create_datagram_endpoint(
+            lambda: DiscoveryClientProtocol(), local_addr=('0.0.0.0', 0)
+        )
+        await asyncio.sleep(timeout)
+        transport.close()
+        return list(found_peers)
 
-            # Sequential download for robustness on single connection
-            # (To do parallel, we would open multiple connections to peer_ips)
-            for i in range(total_chunks):
-                await self._send_msg(writer, P2PProtocol.GET_CHUNK, {"file_hash": file_hash, "chunk_index": i})
-                chunk_resp = await self._recv_msg(reader)
+    async def download_file(self, peer_ips: List[str], port: int, file_hash: str, progress_callback=None):
+        # Try each peer in the list until one works
+        for peer_ip in peer_ips:
+            try:
+                logger.info(f"Connecting to peer: {peer_ip}...")
+                reader, writer = await asyncio.open_connection(peer_ip, port)
                 
-                if chunk_resp and chunk_resp.get('cmd') == P2PProtocol.CHUNK_DATA:
-                    b64_data = chunk_resp['payload']['data']
-                    data = base64.b64decode(b64_data)
+                # Handshake
+                await self._send_msg(writer, P2PProtocol.HANDSHAKE, {"id": "client"})
+                resp = await self._recv_msg(reader)
+                if not resp or resp.get('cmd') != P2PProtocol.HANDSHAKE_ACK:
+                    logger.error(f"Handshake failed with {peer_ip}")
+                    writer.close()
+                    await writer.wait_closed()
+                    continue
+
+                # Get Manifest
+                await self._send_msg(writer, P2PProtocol.QUERY, {"file_hash": file_hash})
+                resp = await self._recv_msg(reader)
+                
+                if not resp or resp.get('cmd') != P2PProtocol.QUERY_HIT:
+                    logger.error(f"File not found on peer {peer_ip}")
+                    writer.close()
+                    await writer.wait_closed()
+                    continue
+                
+                manifest = resp['payload']
+                total_chunks = len(manifest['chunks'])
+                filename = manifest['filename']
+                file_size = manifest['size']
+                
+                logger.info(f"Downloading {filename} ({total_chunks} chunks) from {peer_ip}...")
+
+                # Sequential download
+                for i in range(total_chunks):
+                    await self._send_msg(writer, P2PProtocol.GET_CHUNK, {"file_hash": file_hash, "chunk_index": i})
+                    chunk_resp = await self._recv_msg(reader)
                     
-                    # Verify Integrity
-                    if hashlib.sha256(data).hexdigest() == manifest['chunks'][i]:
-                        self.fm.write_chunk(file_hash, i, data, file_size, filename)
-                        print(f"Downloaded chunk {i+1}/{total_chunks}")
-                    else:
-                        logger.error(f"Hash mismatch for chunk {i}")
-                        break
-            
-            # Final Full File Verification
-            if self.fm.verify_file_integrity(filename, file_hash):
-                logger.info(f"✅ Integrity Verified: {filename} matches hash {file_hash}")
-                print("Download complete.")
-            else:
-                logger.error(f"❌ Integrity Check Failed: {filename} is corrupt.")
+                    if chunk_resp and chunk_resp.get('cmd') == P2PProtocol.CHUNK_DATA:
+                        b64_data = chunk_resp['payload']['data']
+                        data = base64.b64decode(b64_data)
+                        
+                        # Verify Integrity
+                        if hashlib.sha256(data).hexdigest() == manifest['chunks'][i]:
+                            self.fm.write_chunk(file_hash, i, data, file_size, filename)
+                            if progress_callback:
+                                progress_callback(file_hash, filename, i + 1, total_chunks, len(data))
+                            print(f"Downloaded chunk {i+1}/{total_chunks}")
+                        else:
+                            logger.error(f"Hash mismatch for chunk {i}")
+                            break
+                
+                # Final Full File Verification
+                if self.fm.verify_file_integrity(filename, file_hash):
+                    logger.info(f"✅ Integrity Verified: {filename} matches hash {file_hash}")
+                    print("Download complete.")
+                else:
+                    logger.error(f"❌ Integrity Check Failed: {filename} is corrupt.")
 
-            writer.close()
-            await writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
+                return  # Success, exit function
 
-        except Exception as e:
-            logger.error(f"Download failed: {e}")
+            except Exception as e:
+                logger.error(f"Download failed from {peer_ip}: {e}")
+                continue  # Try next peer
 
     async def _send_msg(self, writer, cmd, payload):
         msg = {"cmd": cmd, "payload": payload}
@@ -167,6 +252,8 @@ class P2PClient:
             len_data = await reader.read(4)
             if not len_data: return None
             length = int.from_bytes(len_data, 'big')
+            if length > MAX_MSG_SIZE:
+                return None
             enc_data = await reader.readexactly(length)
             dec_data = self.sm.decrypt(enc_data)
             return json.loads(dec_data.decode())
