@@ -1,3 +1,7 @@
+"""
+P2P File Sharing - GUI Interface
+Modern GUI with asymmetric encryption support
+"""
 import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -11,21 +15,20 @@ import time
 import shutil
 from pathlib import Path
 import socket
-from cryptography.fernet import Fernet
 
-# Ensure project root is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.storage.chunker import FileManager
-from src.security.encryptor import SecurityManager
+from src.security.crypto import AsymmetricCrypto
 from src.core.connection import P2PServer, P2PClient
 
-# Configuration for CustomTkinter
+# Configuration
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
+
 class QueueHandler(logging.Handler):
-    """Redirects logging records to a queue for the GUI to consume."""
+    """Redirects logging records to a queue for the GUI."""
     def __init__(self, log_queue):
         super().__init__()
         self.log_queue = log_queue
@@ -34,7 +37,9 @@ class QueueHandler(logging.Handler):
         msg = self.format(record)
         self.log_queue.put({"type": "log", "text": msg})
 
+
 class ModernFilePicker(ctk.CTkToplevel):
+    """Modern file picker dialog."""
     def __init__(self, master, start_path=None, selection_type="file", title="Browse"):
         super().__init__(master)
         self.selection_type = selection_type
@@ -47,7 +52,6 @@ class ModernFilePicker(ctk.CTkToplevel):
         self.show_hidden = ctk.BooleanVar(value=False)
         self.selected_file_path = None
         
-        # Layout
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         
@@ -95,18 +99,23 @@ class ModernFilePicker(ctk.CTkToplevel):
         self.wait_window()
 
     def refresh_list(self):
-        for widget in self.scroll.winfo_children(): widget.destroy()
+        for widget in self.scroll.winfo_children():
+            widget.destroy()
         self.path_entry.delete(0, "end")
         self.path_entry.insert(0, self.current_path)
-        try: items = sorted(os.listdir(self.current_path))
-        except Exception: return
+        try:
+            items = sorted(os.listdir(self.current_path))
+        except Exception:
+            return
 
         for item in items:
-            if not self.show_hidden.get() and item.startswith('.'): continue
+            if not self.show_hidden.get() and item.startswith('.'):
+                continue
             full_path = os.path.join(self.current_path, item)
             is_dir = os.path.isdir(full_path)
             
-            if not is_dir and self.selection_type == "folder": continue
+            if not is_dir and self.selection_type == "folder":
+                continue
 
             icon = "📁" if is_dir else "📄"
             cmd = (lambda p=full_path: self.enter_folder(p)) if is_dir else (lambda p=full_path: self.select_file(p))
@@ -126,30 +135,39 @@ class ModernFilePicker(ctk.CTkToplevel):
 
     def go_up(self):
         parent = os.path.dirname(self.current_path)
-        if parent != self.current_path: self.enter_folder(parent)
+        if parent != self.current_path:
+            self.enter_folder(parent)
 
     def on_path_entry(self, event=None):
         p = self.path_entry.get()
-        if os.path.exists(p) and os.path.isdir(p): self.enter_folder(p)
+        if os.path.exists(p) and os.path.isdir(p):
+            self.enter_folder(p)
 
     def create_folder(self):
         dialog = ctk.CTkInputDialog(text="Folder Name:", title="New Folder")
         name = dialog.get_input()
         if name:
-            try: os.mkdir(os.path.join(self.current_path, name)); self.refresh_list()
-            except Exception as e: messagebox.showerror("Error", str(e))
+            try:
+                os.mkdir(os.path.join(self.current_path, name))
+                self.refresh_list()
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
 
     def confirm_selection(self):
-        if self.selection_type == "folder": self.result = self.current_path
-        else: self.result = self.selected_file_path
-        if self.result: self.destroy()
+        if self.selection_type == "folder":
+            self.result = self.current_path
+        else:
+            self.result = self.selected_file_path
+        if self.result:
+            self.destroy()
+
 
 class P2PGUI(ctk.CTk):
+    """Main GUI application."""
     def __init__(self):
         super().__init__()
-        self.title("P2P File Sharer - Pro Dashboard")
+        self.title("P2P File Sharer - Secure Edition")
         
-        # Maximize window to cover full page
         self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}")
         self.minsize(900, 600)
         try:
@@ -157,11 +175,11 @@ class P2PGUI(ctk.CTk):
         except Exception:
             self.state('zoomed')
 
-        # --- Fonts ---
+        # Fonts
         self.font_text = ctk.CTkFont(family="Segoe UI", size=14)
         self.font_bold = ctk.CTkFont(family="Segoe UI", size=18, weight="bold")
 
-        # --- Configuration ---
+        # Configuration
         self.port = 8888
         if len(sys.argv) > 1:
             try:
@@ -169,37 +187,29 @@ class P2PGUI(ctk.CTk):
             except ValueError:
                 pass
         
-        # --- Internal Logic & State ---
+        # State
         self.msg_queue = queue.Queue()
         self.download_dest_path = Path.home() / "Downloads"
         self.active_download = None
         
-        # Initialize Core Components
+        # Initialize Core Components with Asymmetric Crypto
         self.fm = FileManager(storage_dir="./shared_files")
+        self.crypto = AsymmetricCrypto(keys_dir="./keys")
+        self.client = P2PClient(self.fm, self.crypto)
+        self.server = P2PServer("0.0.0.0", self.port, self.fm, self.crypto)
         
-        key_path = "secret.key"
-        if not os.path.exists(key_path):
-            with open(key_path, "wb") as f:
-                f.write(Fernet.generate_key())
-            self.msg_queue.put({"type": "log", "text": "⚠️ Generated new secret.key"})
-            self.msg_queue.put({"type": "log", "text": "ℹ️ Peers must share this key to communicate."})
-            
-        self.sm = SecurityManager(key_path=key_path)
-        self.client = P2PClient(self.fm, self.sm)
-        self.server = P2PServer("0.0.0.0", self.port, self.fm, self.sm)
-        
-        # Setup Asyncio Loop in Background Thread
+        # Setup Asyncio Loop
         self.loop = asyncio.new_event_loop()
         self.server_thread = threading.Thread(target=self.start_async_loop, daemon=True)
         self.server_thread.start()
 
         self._setup_ui()
         
-        # Start Polling Loop
         self.after(100, self.check_queue)
-        self.log_message(f"System started on port {self.port}")
+        self.log_message(f"🔐 Secure P2P system started on port {self.port}")
+        self.log_message(f"🔑 RSA keys loaded from: {self.crypto.keys_dir}")
         
-        # Setup Logging Redirect
+        # Setup Logging
         handler = QueueHandler(self.msg_queue)
         formatter = logging.Formatter('%(levelname)s: %(message)s')
         handler.setFormatter(formatter)
@@ -211,15 +221,13 @@ class P2PGUI(ctk.CTk):
         self.loop.run_until_complete(self.server.start())
 
     def _setup_ui(self):
-        # Grid Layout: Row 0 = Tabs (weight 1), Row 1 = Log (weight 0)
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # 1. Tabview
+        # Tabview
         self.tabview = ctk.CTkTabview(self)
         self.tabview.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
         
-        # Make tab buttons fill the whole column/width
         self.tabview.grid_columnconfigure(0, weight=1)
         self.tabview._segmented_button.configure(
             font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
@@ -232,7 +240,7 @@ class P2PGUI(ctk.CTk):
         self._setup_upload_tab()
         self._setup_download_tab()
 
-        # 2. Log Window
+        # Log Window
         self.log_box = ctk.CTkTextbox(self, height=150, font=self.font_text)
         self.log_box.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="ew")
         self.log_box.insert("0.0", "--- Event Log ---\n")
@@ -242,7 +250,6 @@ class P2PGUI(ctk.CTk):
         tab = self.tabview.tab("Upload/Share")
         tab.grid_columnconfigure(0, weight=1)
 
-        # Select Button
         self.btn_select = ctk.CTkButton(tab, text="Select File to Share", font=self.font_bold, height=50, command=self.select_file)
         self.btn_select.grid(row=0, column=0, padx=20, pady=30, sticky="ew")
 
@@ -272,19 +279,18 @@ class P2PGUI(ctk.CTk):
                 btn_copy = ctk.CTkButton(self.info_frame, text="Copy", width=100, height=40, font=self.font_bold, command=self.copy_hash)
                 btn_copy.grid(row=i, column=2, padx=10, pady=10)
 
-        # Start Seeding Button
         self.btn_seed = ctk.CTkButton(tab, text="Start Seeding", font=self.font_bold, height=50, fg_color="green", command=self.start_seeding)
         self.btn_seed.grid(row=2, column=0, padx=20, pady=30, sticky="ew")
 
-        # Export Key Button
-        self.btn_export = ctk.CTkButton(tab, text="Export Security Key", font=self.font_bold, height=40, fg_color="gray", command=self.export_key)
+        # Export Public Key Button
+        self.btn_export = ctk.CTkButton(tab, text="Export Public Key", font=self.font_bold, height=40, fg_color="gray", command=self.export_public_key)
         self.btn_export.grid(row=3, column=0, padx=20, pady=(0, 20), sticky="ew")
 
     def _setup_download_tab(self):
         tab = self.tabview.tab("Download/Receive")
         tab.grid_columnconfigure(0, weight=1)
 
-        # Destination Section
+        # Destination
         dest_frame = ctk.CTkFrame(tab)
         dest_frame.grid(row=0, column=0, padx=10, pady=(30, 10), sticky="ew")
         dest_frame.grid_columnconfigure(1, weight=1)
@@ -297,26 +303,23 @@ class P2PGUI(ctk.CTk):
         btn_browse = ctk.CTkButton(dest_frame, text="Browse Folder", font=self.font_bold, height=40, command=self.browse_dest)
         btn_browse.grid(row=0, column=2, padx=10, pady=10)
 
-        # Source Section
+        # Source
         src_frame = ctk.CTkFrame(tab)
         src_frame.grid(row=1, column=0, padx=10, pady=10, sticky="ew")
         src_frame.grid_columnconfigure(1, weight=1)
 
-        # IP/Port
         conn_frame = ctk.CTkFrame(src_frame, fg_color="transparent")
         conn_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         
         ctk.CTkLabel(conn_frame, text="Peer IPs (comma sep):", font=self.font_text).pack(side="left", padx=5)
         self.entry_ip = ctk.CTkEntry(conn_frame, width=150, font=self.font_text)
         self.entry_ip.pack(side="left", padx=5)
-        # Default empty to encourage auto-discovery, or keep 127.0.0.1
 
         ctk.CTkLabel(conn_frame, text="Port:", font=self.font_text).pack(side="left", padx=5)
         self.entry_port = ctk.CTkEntry(conn_frame, width=80, font=self.font_text)
         self.entry_port.pack(side="left", padx=5)
         self.entry_port.insert(0, "8888")
 
-        # Hash
         ctk.CTkLabel(src_frame, text="Source File Hash:", font=self.font_bold).grid(row=1, column=0, padx=10, pady=10, sticky="w")
         self.entry_hash = ctk.CTkEntry(src_frame, font=self.font_text, placeholder_text="Paste SHA-256 Hash here...")
         self.entry_hash.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
@@ -324,19 +327,19 @@ class P2PGUI(ctk.CTk):
         btn_paste = ctk.CTkButton(src_frame, text="Paste", width=100, height=40, font=self.font_bold, command=self.paste_hash)
         btn_paste.grid(row=1, column=2, padx=10, pady=10)
 
-        # Action Buttons (Connect & Test)
+        # Action Buttons
         action_frame = ctk.CTkFrame(tab, fg_color="transparent")
         action_frame.grid(row=2, column=0, padx=20, pady=20, sticky="ew")
         action_frame.grid_columnconfigure(0, weight=3)
         action_frame.grid_columnconfigure(1, weight=1)
 
-        self.btn_connect = ctk.CTkButton(action_frame, text="Initiate Peer Connection", font=self.font_bold, height=50, command=self.initiate_download)
+        self.btn_connect = ctk.CTkButton(action_frame, text="Initiate Secure Connection", font=self.font_bold, height=50, command=self.initiate_download)
         self.btn_connect.grid(row=0, column=0, padx=(0, 10), sticky="ew")
 
         self.btn_test = ctk.CTkButton(action_frame, text="Test Ping", font=self.font_bold, height=50, fg_color="gray", command=self.test_connection)
         self.btn_test.grid(row=0, column=1, padx=(10, 0), sticky="ew")
 
-        # Progress Section
+        # Progress
         prog_frame = ctk.CTkFrame(tab)
         prog_frame.grid(row=3, column=0, padx=10, pady=10, sticky="ew")
         prog_frame.grid_columnconfigure(0, weight=1)
@@ -350,8 +353,6 @@ class P2PGUI(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(prog_frame, height=20)
         self.progress_bar.grid(row=1, column=0, columnspan=2, padx=10, pady=(5, 15), sticky="ew")
         self.progress_bar.set(0)
-
-    # --- Logic & Threading ---
 
     def log_message(self, msg):
         self.log_box.configure(state="normal")
@@ -368,7 +369,6 @@ class P2PGUI(ctk.CTk):
                 elif msg['type'] == 'progress':
                     self.update_progress(msg)
                 elif msg['type'] == 'seed_complete':
-                    # Only update if the currently selected file matches the one that just finished hashing
                     if self.vars_upload["path"].get() == msg['path']:
                         self.vars_upload["hash"].set(msg['hash'])
                         self.log_message(f"Seeding active. Hash: {msg['hash']}")
@@ -391,20 +391,17 @@ class P2PGUI(ctk.CTk):
         if not os.path.exists(path_str):
             messagebox.showerror("Error", "Invalid file path")
             return
-        try:
-            # Run in thread to avoid freeze
-            def seed_task():
-                try:
-                    manifest = self.fm.slice_file(path_str)
-                    self.msg_queue.put({"type": "log", "text": f"Seeding started: {manifest['filename']}"})
-                    self.msg_queue.put({"type": "seed_complete", "hash": manifest['file_hash'], "path": path_str})
-                except Exception as e:
-                    self.msg_queue.put({"type": "log", "text": f"Error seeding: {e}"})
+        
+        def seed_task():
+            try:
+                manifest = self.fm.slice_file(path_str)
+                self.msg_queue.put({"type": "log", "text": f"Seeding started: {manifest['filename']}"})
+                self.msg_queue.put({"type": "seed_complete", "hash": manifest['file_hash'], "path": path_str})
+            except Exception as e:
+                self.msg_queue.put({"type": "log", "text": f"Error seeding: {e}"})
 
-            threading.Thread(target=seed_task, daemon=True).start()
-            self.log_message("Hashing file... please wait.")
-        except Exception as e:
-            self.log_message(f"Error: {e}")
+        threading.Thread(target=seed_task, daemon=True).start()
+        self.log_message("Hashing file... please wait.")
 
     def browse_dest(self):
         picker = ModernFilePicker(self, start_path=str(self.download_dest_path), selection_type="folder", title="Select Download Folder")
@@ -432,7 +429,6 @@ class P2PGUI(ctk.CTk):
         self.active_download = {"start_time": time.time(), "bytes": 0}
         
         if not ip_str:
-            # Auto-Discovery Mode
             self.log_message("Auto-detecting peers via UDP...")
             self.lbl_status.configure(text="Status: Searching for peers...")
             
@@ -445,10 +441,8 @@ class P2PGUI(ctk.CTk):
                     ips = future.result(timeout=5)
                     if ips:
                         self.msg_queue.put({"type": "log", "text": f"Found peers: {', '.join(ips)}"})
-                        # Update UI
                         self.after(0, lambda: self.entry_ip.delete(0, "end"))
                         self.after(0, lambda: self.entry_ip.insert(0, ", ".join(ips)))
-                        # Start Download
                         self._start_download_process(ips, port, f_hash)
                     else:
                         self.msg_queue.put({"type": "log", "text": "No peers found."})
@@ -458,12 +452,10 @@ class P2PGUI(ctk.CTk):
 
             threading.Thread(target=discovery_task, daemon=True).start()
         else:
-            # Manual Mode
             ips = [ip.strip() for ip in ip_str.split(',') if ip.strip()]
             self._start_download_process(ips, port, f_hash)
 
     def _start_download_process(self, ips, port, f_hash):
-        # Callback to bridge asyncio -> GUI
         def progress_callback(file_hash, filename, chunk_index, total_chunks, bytes_len):
             self.msg_queue.put({
                 "type": "progress",
@@ -481,7 +473,6 @@ class P2PGUI(ctk.CTk):
         self.log_message(f"Requesting {f_hash} from peers: {ips}")
 
     def update_progress(self, msg):
-        # Calculate speed
         now = time.time()
         if self.active_download:
             self.active_download["bytes"] += msg['bytes']
@@ -504,7 +495,8 @@ class P2PGUI(ctk.CTk):
         dest_dir = Path(self.entry_dest.get())
         dest = dest_dir / filename
         try:
-            if not dest_dir.exists(): dest_dir.mkdir(parents=True, exist_ok=True)
+            if not dest_dir.exists():
+                dest_dir.mkdir(parents=True, exist_ok=True)
             if src.exists():
                 shutil.copy(src, dest)
                 self.log_message(f"File saved to: {dest}")
@@ -554,19 +546,22 @@ class P2PGUI(ctk.CTk):
 
         threading.Thread(target=ping_task, daemon=True).start()
 
-    def export_key(self):
-        key_path = "secret.key"
-        if os.path.exists(key_path):
-            with open(key_path, "rb") as f:
-                key_data = f.read()
-            
-            dest = filedialog.asksaveasfilename(defaultextension=".key", initialfile="secret.key", title="Save Security Key")
+    def export_public_key(self):
+        """Export public key for sharing with peers."""
+        try:
+            public_key_pem = self.crypto.get_public_key_bytes()
+            dest = filedialog.asksaveasfilename(
+                defaultextension=".pem", 
+                initialfile="public_key.pem", 
+                title="Save Public Key"
+            )
             if dest:
                 with open(dest, "wb") as f:
-                    f.write(key_data)
-                self.log_message(f"Key exported to: {dest}")
-        else:
-            messagebox.showerror("Error", "Secret key not found!")
+                    f.write(public_key_pem)
+                self.log_message(f"Public key exported to: {dest}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export key: {e}")
+
 
 if __name__ == "__main__":
     app = P2PGUI()
